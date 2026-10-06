@@ -157,6 +157,14 @@ impl Default for PlatformSpecificEventLoopAttributes {
     }
 }
 
+impl<T: 'static> Drop for EventLoop<T> {
+    fn drop(&mut self) {
+        // Android can start a new activity in this process after destroying the last one, and the
+        // new activity's `android_main` needs an event loop of its own.
+        crate::event_loop::EventLoopBuilder::<()>::allow_event_loop_recreation();
+    }
+}
+
 impl<T: 'static> EventLoop<T> {
     pub(crate) fn new(
         attributes: &PlatformSpecificEventLoopAttributes,
@@ -204,6 +212,7 @@ impl<T: 'static> EventLoop<T> {
         let cause = self.cause;
         let mut pending_redraw = self.pending_redraw;
         let mut resized = false;
+        let mut destroyed = false;
 
         callback(event::Event::NewEvents(cause), self.window_target());
 
@@ -219,9 +228,6 @@ impl<T: 'static> EventLoop<T> {
                 },
                 MainEvent::WindowResized { .. } => resized = true,
                 MainEvent::RedrawNeeded { .. } => pending_redraw = true,
-                MainEvent::ContentRectChanged { .. } => {
-                    warn!("TODO: find a way to notify application of content rect change");
-                },
                 MainEvent::GainedFocus => {
                     HAS_FOCUS.store(true, Ordering::Relaxed);
                     callback(
@@ -287,13 +293,23 @@ impl<T: 'static> EventLoop<T> {
                     warn!("TODO: forward onStop notification to application");
                 },
                 MainEvent::Destroy => {
-                    // XXX: maybe exit mainloop to drop things before being
-                    // killed by the OS?
-                    warn!("TODO: forward onDestroy notification to application");
+                    // The activity's `onDestroy` waits on the Java main thread for `android_main`
+                    // to return, so the loop ends here. If Android then starts a new activity in
+                    // this process (say, for a configuration change it relaunches for), that
+                    // activity gets its own `android_main`, which builds a new event loop.
+                    debug!("App Destroyed - exiting the event loop");
+                    destroyed = true;
+                    self.window_target.p.exit();
                 },
-                MainEvent::InsetsChanged { .. } => {
-                    // XXX: how to forward this state to applications?
-                    warn!("TODO: handle Android InsetsChanged notification");
+                MainEvent::ContentRectChanged { .. } | MainEvent::InsetsChanged { .. } => {
+                    // The area left for the app's content changed (system bars, display cutout,
+                    // keyboard), which `NativeActivity` reports as a new content rect and
+                    // `GameActivity` also as new insets. There is no event for this, so report a
+                    // `Resized`, even if the size stays the same, for the app to read the new
+                    // area. Not before the window exists: its size would be zero.
+                    if self.android_app.native_window().is_some() {
+                        resized = true;
+                    }
                 },
                 unknown => {
                     trace!("Unknown MainEvent {unknown:?} (ignored)");
@@ -307,19 +323,23 @@ impl<T: 'static> EventLoop<T> {
         // a borrow of `self` while iterating
         let android_app = self.android_app.clone();
 
-        // Process input events
-        match android_app.input_events_iter() {
-            Ok(mut input_iter) => loop {
-                let read_event =
-                    input_iter.next(|event| self.handle_input_event(&android_app, event, callback));
+        // Process input events, but not after `Destroy`: `NativeActivity` has detached its input
+        // queue by then, and `GameActivity` (android-activity 0.6.1) lets go of its glue on
+        // `Destroy`, after which reading input only logs an error.
+        if !destroyed {
+            match android_app.input_events_iter() {
+                Ok(mut input_iter) => loop {
+                    let read_event = input_iter
+                        .next(|event| self.handle_input_event(&android_app, event, callback));
 
-                if !read_event {
-                    break;
-                }
-            },
-            Err(err) => {
-                tracing::warn!("Failed to get input events iterator: {err:?}");
-            },
+                    if !read_event {
+                        break;
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!("Failed to get input events iterator: {err:?}");
+                },
+            }
         }
 
         // Empty the user event buffer

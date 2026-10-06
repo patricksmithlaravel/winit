@@ -39,3 +39,12 @@ The migration guide could reference other migration examples in the current
 changelog entry.
 
 ## Unreleased
+
+### Changed
+
+- On Android, report content rect and window insets changes as `WindowEvent::Resized`.
+
+### Fixed
+
+- On Android, end the event loop when the activity is destroyed, so `android_main` returns and a new activity of the same process can start.
+- On Android, allow building a new `EventLoop` once the previous one has been dropped.

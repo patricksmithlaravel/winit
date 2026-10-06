@@ -99,7 +99,9 @@ impl<T> EventLoopBuilder<T> {
     /// - **Wayland/X11:** to prevent running under `Wayland` or `X11` unset `WAYLAND_DISPLAY` or
     ///   `DISPLAY` respectively when building the event loop.
     /// - **Android:** must be configured with an `AndroidApp` from `android_main()` by calling
-    ///   [`.with_android_app(app)`] before calling `.build()`, otherwise it'll panic.
+    ///   [`.with_android_app(app)`] before calling `.build()`, otherwise it'll panic. Android can
+    ///   destroy an activity and start a new one in the same process, which calls `android_main()`
+    ///   again, so a new event loop can be built once the previous one has been dropped.
     ///
     /// [`platform`]: crate::platform
     #[cfg_attr(
@@ -127,7 +129,7 @@ impl<T> EventLoopBuilder<T> {
         })
     }
 
-    #[cfg(web_platform)]
+    #[cfg(any(web_platform, android_platform))]
     pub(crate) fn allow_event_loop_recreation() {
         EVENT_LOOP_CREATED.store(false, Ordering::Relaxed);
     }
